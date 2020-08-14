@@ -33,13 +33,12 @@
 #include <poll.h>
 #include <signal.h>
 #include <sys/signalfd.h>
-#include <sys/resource.h>
 #include <termio.h>
 
 #include <alsa/asoundlib.h>
 
 #define APP_TTY_BAUD_RATE		B115200
-#define APP_MIDI_BUFFER_SIZE	4096
+#define APP_MIDI_BUFFER_SIZE	256
 
 
 static int m_signal_fd;
@@ -89,22 +88,21 @@ int main(int argc, char* argv[]) {
 		}
 	};
 
-	result = setpriority(PRIO_PROCESS, 0, 100);
+	/*result = setpriority(PRIO_PROCESS, 0, 100);
 
 	if ( result < 0 ) {
 		printf("WARNING: Unable to increase process priority: %s\n", strerror(errno));
-	}
+	}*/
 
-	sigfillset(&mask);
-	result = sigprocmask(SIG_SETMASK, &mask, NULL);
+	sigemptyset(&mask);
+	sigaddset(&mask, SIGINT);
+	result = sigprocmask(SIG_BLOCK, &mask, NULL);
 
 	if ( result != 0 ) {
 		fprintf(stderr, "Unable to block signals\n");
 		goto cleanup1;
 	}
 
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
 	m_signal_fd = signalfd(-1, &mask, SFD_NONBLOCK);
 
 	if ( m_signal_fd < 0 ) {
@@ -143,7 +141,7 @@ int main(int argc, char* argv[]) {
 		goto cleanup3;
 	}
 
-	result = snd_rawmidi_open(&m_midi_handle, NULL, argv[1], 0);
+	result = snd_rawmidi_open(&m_midi_handle, NULL, argv[1], SND_RAWMIDI_NONBLOCK);
 
 	if ( result < 0 ) {
 		fprintf(stderr, "Unable to open MIDI device: %s\n", snd_strerror(result));
@@ -188,6 +186,7 @@ int main(int argc, char* argv[]) {
 			goto cleanup4;
 		}
 
+		midi_revents = 0;
 		result = snd_rawmidi_poll_descriptors_revents(m_midi_handle, pfds + 2, n_pfds - 2, &midi_revents);
 
 		if ( result < 0 ) {
@@ -195,31 +194,34 @@ int main(int argc, char* argv[]) {
 			goto cleanup4;
 		}
 
+		if ( midi_revents & (POLL_ERR | POLL_HUP) ) {
+			fprintf(stderr, "Unable to poll MIDI device\n");
+			goto cleanup4;
+		}
+
 		if ( midi_revents & POLL_IN ) {
+
 			int n_read = snd_rawmidi_read(m_midi_handle, midi_buffer, sizeof(midi_buffer));
 
-			if ( n_read < 0 ) {
-				fprintf(stderr, "Unable to read MIDI event data: %s\n", snd_strerror(n_read));
-				goto cleanup4;
-			}
-
-			result = write_all(m_tty_fd, midi_buffer, n_read);
-			tcflush(m_tty_fd, TCIOFLUSH);
-
-			if ( result < 0 ) {
-				fprintf(stderr, "Unable to write MIDI event data to TTY device: %s\n", strerror(errno));
-				goto cleanup4;
-			}
-
-			if ( logging_enabled ) {
-				for (int i = 0; i < n_read; i++) {
-					printf("%02x ", midi_buffer[i]);
+			if ( n_read != -EAGAIN ) {
+				if ( n_read < 0 ) {
+					fprintf(stderr, "Unable to read MIDI event data: %s\n", snd_strerror(n_read));
+					goto cleanup4;
 				}
 
-				putc('\n', stdout);
+				result = write_all(m_tty_fd, midi_buffer, n_read);
 
-				if ( isatty(STDOUT_FILENO) ) {
-					tcflush(STDOUT_FILENO, TCIOFLUSH);
+				if (result < 0) {
+					fprintf(stderr, "Unable to write MIDI event data to TTY device: %s\n", strerror(errno));
+					goto cleanup4;
+				}
+
+				if (logging_enabled) {
+					for (int i = 0; i < n_read; i++) {
+						printf("%02x ", midi_buffer[i]);
+					}
+
+					putc('\n', stdout);
 				}
 			}
 		}
