@@ -12,6 +12,6 @@ If the optional argument 'log' is specified, MIDI bytes will be written to stdou
 
 A list of available MIDI devices can be obtained with `amidi -l`.
 
-# Dependencies
+## Dependencies
 
 libasound2
